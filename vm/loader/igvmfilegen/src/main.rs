@@ -27,15 +27,15 @@ use igvmfilegen_config::ResourceType;
 use igvmfilegen_config::Resources;
 use igvmfilegen_config::SecureAvicType;
 use igvmfilegen_config::SnpInjectionType;
+use igvmfilegen_config::StaticElfImage;
 use igvmfilegen_config::UefiConfigType;
-use loader::elf::load_static_elf;
 use loader::importer::Aarch64Register;
 use loader::importer::GuestArch;
 use loader::importer::GuestArchKind;
 use loader::importer::ImageLoad;
 use loader::importer::X86Register;
 use loader::linux::InitrdConfig;
-use loader::linux::KernelInfo;
+use loader::linux::StaticElfLoadInfo;
 use loader::paravisor::CommandLineType;
 use loader::paravisor::Vtl0Config;
 use loader::paravisor::Vtl0Linux;
@@ -423,7 +423,7 @@ trait IgvmfilegenRegister: IgvmLoaderRegister + 'static {
         importer: &mut impl ImageLoad<Self>,
         image: &mut F,
         minimum_start_address: u64,
-    ) -> Result<loader::linux::KernelInfo, loader::linux::Error>
+    ) -> Result<StaticElfLoadInfo, loader::linux::Error>
     where
         F: std::io::Read + std::io::Seek,
         Self: GuestArch;
@@ -474,7 +474,7 @@ impl IgvmfilegenRegister for X86Register {
         importer: &mut impl ImageLoad<Self>,
         image: &mut F,
         minimum_start_address: u64,
-    ) -> Result<loader::linux::KernelInfo, loader::linux::Error>
+    ) -> Result<StaticElfLoadInfo, loader::linux::Error>
     where
         F: std::io::Read + std::io::Seek,
         Self: GuestArch,
@@ -542,7 +542,7 @@ impl IgvmfilegenRegister for Aarch64Register {
         importer: &mut impl ImageLoad<Self>,
         image: &mut F,
         minimum_start_address: u64,
-    ) -> Result<loader::linux::KernelInfo, loader::linux::Error>
+    ) -> Result<StaticElfLoadInfo, loader::linux::Error>
     where
         F: std::io::Read + std::io::Seek,
         Self: GuestArch,
@@ -670,19 +670,18 @@ fn load_image<'a, R: IgvmfilegenRegister + GuestArch + 'static>(
                     supports_static_elf: None,
                 }
             } else if let Some(static_elf) = static_elf {
-                let KernelInfo {
-                    gpa,
-                    entrypoint,
-                    size,
-                } = load_static_elf(&mut loader.nested_loader(), resources)?;
+                let mut inner_loader = loader.nested_loader();
+                let StaticElfLoadInfo { gpa, size } =
+                    load_static_elf(&mut inner_loader, static_elf, resources)?;
+                let vp_context = inner_loader.take_vp_context();
                 Vtl0Config {
                     supports_pcat: false,
                     supports_uefi: None,
                     supports_linux: None,
                     supports_static_elf: Some(loader::paravisor::Vtl0StaticElf {
                         gpa,
-                        entrypoint,
                         size,
+                        vp_context,
                     }),
                 }
             } else {
@@ -784,16 +783,17 @@ fn load_linux<R: IgvmfilegenRegister + GuestArch + 'static>(
     Ok(load_info)
 }
 
-fn load_static_elf2<R: IgvmfilegenRegister + GuestArch + 'static>(
+fn load_static_elf<R: IgvmfilegenRegister + GuestArch + 'static>(
     loader: &mut IgvmVtlLoader<'_, R>,
+    static_elf: &StaticElfImage,
     resources: &Resources,
-) -> Result<loader::linux::KernelInfo, anyhow::Error> {
+) -> Result<StaticElfLoadInfo, anyhow::Error> {
     let path = resources
         .get(ResourceType::StaticElf)
         .expect("validated present");
     let mut image = fs_err::File::open(path)
         .context(format!("reading vtl0 kernel image at {}", path.display()))?;
-    let load_info = R::load_linux_kernel_and_initrd(loader, &mut image, 0, None, None)
+    let load_info = R::load_static_elf(loader, &mut image, static_elf.minimum_load_address as u64)
         .context("loading static elf")?;
     Ok(load_info)
 }

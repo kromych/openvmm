@@ -5,7 +5,6 @@
 
 use crate::common::DEFAULT_GDT_SIZE;
 use crate::common::import_default_gdt;
-use crate::elf::load_static_elf;
 use crate::importer::Aarch64Register;
 use crate::importer::BootPageAcceptance;
 use crate::importer::GuestArch;
@@ -201,6 +200,15 @@ pub struct LoadInfo {
     pub dtb: Option<std::ops::Range<u64>>,
 }
 
+/// Information returned about the kernel loaded.
+#[derive(Debug, Default)]
+pub struct StaticElfLoadInfo {
+    /// The base gpa the image was loaded at.
+    pub gpa: u64,
+    /// The size in bytes of the region the image was loaded at.
+    pub size: u64,
+}
+
 /// Check if an address is aligned to a page.
 fn check_address_alignment(address: u64) -> Result<(), Error> {
     if address % HV_PAGE_SIZE != 0 {
@@ -270,7 +278,7 @@ where
         minimum_address_used: min_addr,
         next_available_address: next_addr,
         entrypoint,
-    } = load_static_elf(
+    } = crate::elf::load_static_elf(
         importer,
         kernel_image,
         kernel_minimum_start_address,
@@ -308,7 +316,7 @@ pub fn load_static_elf_x64<F>(
     importer: &mut dyn ImageLoad<X86Register>,
     image: &mut F,
     minimum_start_address: u64,
-) -> Result<KernelInfo, Error>
+) -> Result<StaticElfLoadInfo, Error>
 where
     F: std::io::Read + std::io::Seek,
 {
@@ -317,7 +325,7 @@ where
         minimum_address_used: min_addr,
         next_available_address: next_addr,
         entrypoint,
-    } = load_static_elf(
+    } = crate::elf::load_static_elf(
         importer,
         image,
         minimum_start_address,
@@ -401,10 +409,9 @@ where
     import_reg(X86Register::R10(isolation_cpuid.ecx as u64))?;
     import_reg(X86Register::R11(isolation_cpuid.edx as u64))?;
 
-    Ok(KernelInfo {
+    Ok(StaticElfLoadInfo {
         gpa: min_addr,
         size: total_page_count * HV_PAGE_SIZE,
-        entrypoint,
     })
 }
 
@@ -792,7 +799,7 @@ pub fn load_static_elf_arm64<F>(
     importer: &mut dyn ImageLoad<Aarch64Register>,
     image: &mut F,
     minimum_start_address: u64,
-) -> Result<KernelInfo, Error>
+) -> Result<StaticElfLoadInfo, Error>
 where
     F: std::io::Read + std::io::Seek,
 {
@@ -801,7 +808,7 @@ where
         minimum_address_used: min_addr,
         next_available_address: next_addr,
         entrypoint,
-    } = load_static_elf(
+    } = crate::elf::load_static_elf(
         importer,
         image,
         minimum_start_address,
@@ -813,10 +820,9 @@ where
     .map_err(Error::ElfLoader)?;
     tracing::trace!(min_addr, next_addr, entrypoint, "loaded static elf");
 
-    Ok(KernelInfo {
+    Ok(StaticElfLoadInfo {
         gpa: min_addr,
         size: next_addr - min_addr,
-        entrypoint,
     })
 }
 
