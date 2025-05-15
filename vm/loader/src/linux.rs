@@ -3,6 +3,7 @@
 
 //! Linux specific loader definitions and implementation.
 
+use crate::common::DEFAULT_GDT_SIZE;
 use crate::common::import_default_gdt;
 use crate::elf::load_static_elf;
 use crate::importer::Aarch64Register;
@@ -291,6 +292,119 @@ where
         },
         initrd: initrd_info,
         dtb: None,
+    })
+}
+
+/// Load only a Static ELF to VTL0 on x86_64.
+/// This does not setup register state or any other config information.
+///
+/// # Arguments
+///
+/// * `importer` - The importer to use.
+/// * `image` - Static ELF image.
+/// * `minimum_start_address` - The minimum address the kernel can load at.
+///   It cannot contain an entrypoint or program headers that refer to memory below this address.
+pub fn load_static_elf_x64<F>(
+    importer: &mut dyn ImageLoad<X86Register>,
+    image: &mut F,
+    minimum_start_address: u64,
+) -> Result<KernelInfo, Error>
+where
+    F: std::io::Read + std::io::Seek,
+{
+    tracing::trace!(minimum_start_address, "loading x86_64 static elf");
+    let crate::elf::LoadInfo {
+        minimum_address_used: min_addr,
+        next_available_address: next_addr,
+        entrypoint,
+    } = load_static_elf(
+        importer,
+        image,
+        minimum_start_address,
+        0,
+        false,
+        BootPageAcceptance::Exclusive,
+        "static-elf",
+    )
+    .map_err(Error::ElfLoader)?;
+    tracing::trace!(min_addr, next_addr, entrypoint, "loaded static elf");
+
+    let isolation_config = importer.isolation_config();
+    let image_gpa_base: u64 = min_addr;
+    let page_table_gpa_base: u64 = next_addr;
+    let image_page_count = align_up_to_page_size(next_addr - min_addr) / HV_PAGE_SIZE;
+    let page_table_size: u64 = HV_PAGE_SIZE * 6;
+    let gdt_gpa_base: u64 = page_table_gpa_base + page_table_size;
+
+    let page_tables = build_page_tables_64(page_table_gpa_base, 0, IdentityMapSize::Size4Gb, None);
+
+    // Size must match expected compiled constant
+    assert_eq!(page_tables.len(), page_table_size as usize);
+
+    let mut total_page_count = image_gpa_base / HV_PAGE_SIZE + image_page_count;
+
+    importer
+        .import_pages(
+            page_table_gpa_base / HV_PAGE_SIZE,
+            page_table_size / HV_PAGE_SIZE,
+            "static-elf-page-tables",
+            BootPageAcceptance::Exclusive,
+            &page_tables,
+        )
+        .map_err(Error::Importer)?;
+
+    total_page_count += page_table_size / HV_PAGE_SIZE;
+
+    // The default GDT is used with a page count of one.
+    assert_eq!(DEFAULT_GDT_SIZE, HV_PAGE_SIZE);
+    import_default_gdt(importer, gdt_gpa_base / HV_PAGE_SIZE).map_err(Error::Importer)?;
+    total_page_count += DEFAULT_GDT_SIZE / HV_PAGE_SIZE;
+
+    let mut import_reg = |register| {
+        importer
+            .import_vp_register(register)
+            .map_err(Error::Importer)
+    };
+
+    // Set CR0
+    import_reg(X86Register::Cr0(
+        x86defs::X64_CR0_PG | x86defs::X64_CR0_NE | x86defs::X64_CR0_MP | x86defs::X64_CR0_PE,
+    ))?;
+
+    // Set CR3 to point to page table which starts right after the image.
+    import_reg(X86Register::Cr3(page_table_gpa_base))?;
+
+    // Set CR4
+    import_reg(X86Register::Cr4(
+        x86defs::X64_CR4_PAE
+            | x86defs::X64_CR4_MCE
+            | x86defs::X64_CR4_FXSR
+            | x86defs::X64_CR4_XMMEXCPT,
+    ))?;
+
+    // Set EFER to LME, LMA, and NXE for 64 bit mode.
+    import_reg(X86Register::Efer(
+        x86defs::X64_EFER_LMA | x86defs::X64_EFER_LME | x86defs::X64_EFER_NXE,
+    ))?;
+
+    // Set PAT
+    import_reg(X86Register::Pat(x86defs::X86X_MSR_DEFAULT_PAT))?;
+
+    // Set RIP to the entry point.
+    import_reg(X86Register::Rip(entrypoint))?;
+
+    // Set R8-R11 to the hypervisor isolation CPUID leaf values.
+    let isolation_cpuid = isolation_config.get_cpuid();
+
+    import_reg(X86Register::R8(isolation_cpuid.eax as u64))?;
+    import_reg(X86Register::R9(isolation_cpuid.ebx as u64))?;
+    import_reg(X86Register::R10(isolation_cpuid.ecx as u64))?;
+    import_reg(X86Register::R11(isolation_cpuid.edx as u64))?;
+
+    Ok(KernelInfo {
+        gpa: min_addr,
+        size: total_page_count * HV_PAGE_SIZE,
+        entrypoint,
     })
 }
 
@@ -662,6 +776,47 @@ where
         },
         initrd: initrd_info,
         dtb,
+    })
+}
+
+/// Load only a Static ELF to VTL0 on arm64.
+/// This does not setup register state or any other config information.
+///
+/// # Arguments
+///
+/// * `importer` - The importer to use.
+/// * `image` - Static ELF image.
+/// * `minimum_start_address` - The minimum address the kernel can load at.
+///   It cannot contain an entrypoint or program headers that refer to memory below this address.
+pub fn load_static_elf_arm64<F>(
+    importer: &mut dyn ImageLoad<Aarch64Register>,
+    image: &mut F,
+    minimum_start_address: u64,
+) -> Result<KernelInfo, Error>
+where
+    F: std::io::Read + std::io::Seek,
+{
+    tracing::trace!(minimum_start_address, "loading aarch64 static elf");
+    let crate::elf::LoadInfo {
+        minimum_address_used: min_addr,
+        next_available_address: next_addr,
+        entrypoint,
+    } = load_static_elf(
+        importer,
+        image,
+        minimum_start_address,
+        0,
+        false,
+        BootPageAcceptance::Exclusive,
+        "static-elf",
+    )
+    .map_err(Error::ElfLoader)?;
+    tracing::trace!(min_addr, next_addr, entrypoint, "loaded static elf");
+
+    Ok(KernelInfo {
+        gpa: min_addr,
+        size: next_addr - min_addr,
+        entrypoint,
     })
 }
 

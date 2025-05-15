@@ -28,12 +28,14 @@ use igvmfilegen_config::Resources;
 use igvmfilegen_config::SecureAvicType;
 use igvmfilegen_config::SnpInjectionType;
 use igvmfilegen_config::UefiConfigType;
+use loader::elf::load_static_elf;
 use loader::importer::Aarch64Register;
 use loader::importer::GuestArch;
 use loader::importer::GuestArchKind;
 use loader::importer::ImageLoad;
 use loader::importer::X86Register;
 use loader::linux::InitrdConfig;
+use loader::linux::KernelInfo;
 use loader::paravisor::CommandLineType;
 use loader::paravisor::Vtl0Config;
 use loader::paravisor::Vtl0Linux;
@@ -417,6 +419,15 @@ trait IgvmfilegenRegister: IgvmLoaderRegister + 'static {
         F: std::io::Read + std::io::Seek,
         Self: GuestArch;
 
+    fn load_static_elf<F>(
+        importer: &mut impl ImageLoad<Self>,
+        image: &mut F,
+        minimum_start_address: u64,
+    ) -> Result<loader::linux::KernelInfo, loader::linux::Error>
+    where
+        F: std::io::Read + std::io::Seek,
+        Self: GuestArch;
+
     fn load_openhcl<F>(
         importer: &mut dyn ImageLoad<Self>,
         kernel_image: &mut F,
@@ -457,6 +468,18 @@ impl IgvmfilegenRegister for X86Register {
             kernel_minimum_start_address,
             initrd,
         )
+    }
+
+    fn load_static_elf<F>(
+        importer: &mut impl ImageLoad<Self>,
+        image: &mut F,
+        minimum_start_address: u64,
+    ) -> Result<loader::linux::KernelInfo, loader::linux::Error>
+    where
+        F: std::io::Read + std::io::Seek,
+        Self: GuestArch,
+    {
+        loader::linux::load_static_elf_x64(importer, image, minimum_start_address)
     }
 
     fn load_openhcl<F>(
@@ -515,6 +538,18 @@ impl IgvmfilegenRegister for Aarch64Register {
         )
     }
 
+    fn load_static_elf<F>(
+        importer: &mut impl ImageLoad<Self>,
+        image: &mut F,
+        minimum_start_address: u64,
+    ) -> Result<loader::linux::KernelInfo, loader::linux::Error>
+    where
+        F: std::io::Read + std::io::Seek,
+        Self: GuestArch,
+    {
+        loader::linux::load_static_elf_arm64(importer, image, minimum_start_address)
+    }
+
     fn load_openhcl<F>(
         importer: &mut dyn ImageLoad<Self>,
         kernel_image: &mut F,
@@ -567,6 +602,7 @@ fn load_image<'a, R: IgvmfilegenRegister + GuestArch + 'static>(
             memory_page_count,
             uefi,
             ref linux,
+            ref static_elf,
         } => {
             if uefi && linux.is_some() {
                 anyhow::bail!("cannot include both UEFI and Linux images in OpenHCL image");
@@ -620,6 +656,7 @@ fn load_image<'a, R: IgvmfilegenRegister + GuestArch + 'static>(
                     supports_pcat: loader.loader().arch() == GuestArchKind::X86_64,
                     supports_uefi: Some((load_info, vp_context)),
                     supports_linux: None,
+                    supports_static_elf: None,
                 }
             } else if let Some(linux) = linux {
                 let load_info = load_linux(&mut loader.nested_loader(), linux, resources)?;
@@ -630,12 +667,30 @@ fn load_image<'a, R: IgvmfilegenRegister + GuestArch + 'static>(
                         command_line: &linux.command_line,
                         load_info,
                     }),
+                    supports_static_elf: None,
+                }
+            } else if let Some(static_elf) = static_elf {
+                let KernelInfo {
+                    gpa,
+                    entrypoint,
+                    size,
+                } = load_static_elf(&mut loader.nested_loader(), resources)?;
+                Vtl0Config {
+                    supports_pcat: false,
+                    supports_uefi: None,
+                    supports_linux: None,
+                    supports_static_elf: Some(loader::paravisor::Vtl0StaticElf {
+                        gpa,
+                        entrypoint,
+                        size,
+                    }),
                 }
             } else {
                 Vtl0Config {
                     supports_pcat: false,
                     supports_uefi: None,
                     supports_linux: None,
+                    supports_static_elf: None,
                 }
             };
 
@@ -726,5 +781,19 @@ fn load_linux<R: IgvmfilegenRegister + GuestArch + 'static>(
     };
     let load_info = R::load_linux_kernel_and_initrd(loader, &mut kernel, 0, initrd, None)
         .context("loading linux kernel and initrd")?;
+    Ok(load_info)
+}
+
+fn load_static_elf2<R: IgvmfilegenRegister + GuestArch + 'static>(
+    loader: &mut IgvmVtlLoader<'_, R>,
+    resources: &Resources,
+) -> Result<loader::linux::KernelInfo, anyhow::Error> {
+    let path = resources
+        .get(ResourceType::StaticElf)
+        .expect("validated present");
+    let mut image = fs_err::File::open(path)
+        .context(format!("reading vtl0 kernel image at {}", path.display()))?;
+    let load_info = R::load_linux_kernel_and_initrd(loader, &mut image, 0, None, None)
+        .context("loading static elf")?;
     Ok(load_info)
 }
