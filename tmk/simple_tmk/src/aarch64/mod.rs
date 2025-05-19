@@ -14,15 +14,20 @@ mod gic;
 
 const NUM_CPUS: usize = 1;
 
-// TODO: qemu specific
-const GICD_BASE: u64 = 0x08000000;
-const GICR_BASE: u64 = 0x080a0000;
+// qemu specific
+// const GICD_BASE: u64 = 0x08000000;
+// const GICR_BASE: u64 = 0x080a0000;
+
+const GICD_BASE: u64 = 0xff000000;
+const GICR_BASE: u64 = 0xff020000;
 
 #[tmk_test]
 fn gic_test(_: TestContext<'_>) {
     // Enable all exceptions.
     // SAFETY: not touching memory, inteerupt handler is set up.
     unsafe { core::arch::asm!("msr DAIFClr, #0xf", options(nomem, nostack)) };
+
+    log!("GICD @ {GICD_BASE:x}, GICR @ {GICR_BASE:x}");
 
     let mut gic = Gic::new(GICD_BASE as usize, GICR_BASE as usize, NUM_CPUS);
     gic.init_gicd();
